@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Grease Pencil Extras",
     "author": "pongbuster",
-    "version": (1, 0),
+    "version": (1, 2),
     "blender": (2, 90, 0),
     "location": "View3D > Sidebar (N)",
     "description": "A collection of utilities to align grease pencil stroke points and adjust stroke hardness.",
@@ -11,6 +11,7 @@ bl_info = {
 }
 
 import bpy
+import gpu
 from bpy_extras import view3d_utils
 from mathutils import Vector
 from bpy.props import IntProperty
@@ -26,12 +27,66 @@ def init_selected(context):
     selected_points.clear()
     
     for lr in gp.data.layers:
+        if lr.hide or lr.lock: continue
         for fr in lr.frames:
             if fr.frame_number == context.scene.frame_current:
                 for s in fr.strokes:
                     for p in s.points:
                         if p.select:
                             selected_points.append(p)
+
+def getPixel(X, Y):
+    fb = gpu.state.active_framebuffer_get()
+    screen_buffer = fb.read_color(X, Y, 1, 1, 3, 0, 'FLOAT')
+
+    rgb_as_list = screen_buffer.to_list()[0]
+
+    R = rgb_as_list[0][0]
+    G = rgb_as_list[0][1]
+    B = rgb_as_list[0][2]
+
+    return R, G, B
+    
+class eyedropperOperator(bpy.types.Operator):
+    """Left click to sample Fill color.
+SHIFT-Left click to sample Stroke color.
+"""
+
+    bl_idname = "color.eyedropper"
+    bl_label = "Color Eyedropper"
+    bl_options = {'REGISTER' }
+    
+    @classmethod
+    def poll(self, context):
+        return (context.mode == 'PAINT_GPENCIL' or context.mode == 'VERTEX_GPENCIL')
+    
+    def modal(self, context, event):
+        if event.type == "LEFTMOUSE":
+            C = bpy.context
+
+            if C.mode == 'VERTEX_GPENCIL':
+                brush = C.tool_settings.gpencil_vertex_paint.brush
+            else:
+                brush = C.tool_settings.gpencil_paint.brush
+                
+            clr = getPixel(event.mouse_x, event.mouse_y)
+
+            if event.shift == False:
+                brush.gpencil_settings.vertex_mode = 'FILL' 
+            else:
+                brush.gpencil_settings.vertex_mode = 'STROKE'
+                
+            brush.color = clr
+
+            context.window.cursor_modal_restore()
+            return {'FINISHED'}
+            
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.window.cursor_modal_set("EYEDROPPER")
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
 
 class hardnessOperator(bpy.types.Operator):
     """Middle mouse to adjust selected Strokes' hardness.
@@ -59,11 +114,12 @@ Left click to apply.
                 for p in selected_points:
                     p.strength += incr
             elif event.ctrl:
-                incr *= 100
+                incr *= 10
                 for p in selected_points:
                     p.pressure += incr
             else:    
                 for lr in context.active_object.data.layers:
+                    if lr.hide or lr.lock: continue
                     for fr in lr.frames:
                         if fr.frame_number == context.scene.frame_current:
                             for s in fr.strokes:
@@ -84,6 +140,46 @@ Left click to apply.
         context.window_manager.modal_handler_add(self)
         
         return {'RUNNING_MODAL'}
+
+class mirrorOperator(bpy.types.Operator):
+    arg: bpy.props.StringProperty()
+    
+    bl_idname = "stroke.mirror"
+    bl_label = "Mirror Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    mirror : IntProperty(default=0)
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.mirror == 1:
+            txt = "Mirror vertically"
+        else:
+            txt = "Mirror horizontally"
+        
+        return txt
+
+    @classmethod
+    def poll(self, context):
+        return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
+
+    def execute(self, context):
+        prev_mode = context.mode
+        bpy.ops.object.mode_set(mode='EDIT_GPENCIL')
+        if self.mirror == 0:
+            bpy.ops.transform.mirror(orient_type='GLOBAL',
+                orient_matrix=((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+                orient_matrix_type='GLOBAL',
+                constraint_axis=(True, False, False))
+        else:
+            bpy.ops.transform.mirror(orient_type='GLOBAL',
+                orient_matrix=((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+                orient_matrix_type='GLOBAL',
+                constraint_axis=(False, False, True))
+        bpy.ops.object.mode_set(mode=prev_mode)
+            
+        return {'FINISHED'}
+
 
 class convergeOperator(bpy.types.Operator):
     arg: bpy.props.StringProperty()
@@ -215,7 +311,7 @@ class quickStrokeSampleOperator(bpy.types.Operator):
         global g_sample_length
         
         context.area.header_text_set("Sample Length: %.4f" % g_sample_length)
-            
+        context.scene.tool_settings.gpencil_selectmode_edit = 'POINT'    
         context.tool_settings.use_gpencil_select_mask_stroke=False
         context.tool_settings.use_gpencil_select_mask_point=True
 
@@ -246,16 +342,47 @@ class PGP_PT_sidebarPanel(bpy.types.Panel):
         col.operator('stroke.converge', icon = 'ANCHOR_TOP', text = '' ).align = 2
         
         row.separator()
+
+        col = row.column()
+        col.operator('stroke.mirror', icon = 'MOD_MIRROR', text = "").mirror = 0
+        col = row.column()
+        col.operator('stroke.mirror', icon = 'SNAP_EDGE', text = "").mirror = 1
+
+        row.separator()
+        
+        col = row.column()
+        col.operator('stroke.sample', icon = 'MOD_PARTICLE_INSTANCE', text = "")
+
+        row.separator()
+
+        col = row.column()
+        col.operator('color.eyedropper', icon = 'EYEDROPPER', text = "")
+
+        box = layout.box()
+        row = box.row(align=True)
+        col = row.column()
+        col.operator('view3d.cutstroke_operator', icon = "SNAP_MIDPOINT", text = "" )
         row.separator()
         col = row.column()
-        col.operator('stroke.sample', icon = 'EVENT_S', text = "")
+        col.operator('stroke.snapigon', icon = "SNAP_ON", text = "" )
+        row.separator()
+        col = row.column()
+        col.operator( 'object.pointslide_operator', icon='CON_TRACKTO', text='' )
+        row.separator()
         col = row.column()
         col.operator('stroke.hardness', icon = 'EVENT_H', text = "")
+        row.separator()
+        col = row.column()
+        col.operator("object.drawtext_operator", icon='EVENT_T', text='')
+
+        
 
 # Class list to register
 _classes = [
+    eyedropperOperator,
     hardnessOperator,
     convergeOperator,
+    mirrorOperator,
     quickStrokeSampleOperator,
     PGP_PT_sidebarPanel
 ]
