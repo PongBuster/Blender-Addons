@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Grease Pencil Extras",
     "author": "pongbuster",
-    "version": (1, 2),
+    "version": (1, 3),
     "blender": (2, 90, 0),
     "location": "View3D > Sidebar (N)",
     "description": "A collection of utilities to align grease pencil stroke points and adjust stroke hardness.",
@@ -14,26 +14,20 @@ import bpy
 import gpu
 from bpy_extras import view3d_utils
 from mathutils import Vector
-from bpy.props import IntProperty
+from bpy.props import IntProperty, FloatProperty, EnumProperty
 
-selected_points = []
-
-def init_selected(context):
-    gp = context.active_object
-    
-    if gp.type != 'GPENCIL':
-        return
-    
-    selected_points.clear()
-    
-    for lr in gp.data.layers:
-        if lr.hide or lr.lock: continue
-        for fr in lr.frames:
-            if fr.frame_number == context.scene.frame_current:
-                for s in fr.strokes:
-                    for p in s.points:
-                        if p.select:
-                            selected_points.append(p)
+def get_selected_points(context):
+    if context.active_object.type != 'GPENCIL':
+        return []
+    gp = context.active_object.data
+    return [p
+        for lr in gp.layers
+            if not lr.lock and not lr.hide  #Respect layer locking and visibility
+                for fr in ([fr for fr in lr.frames if fr.select or fr == lr.active_frame] if gp.use_multiedit else [lr.active_frame])    #Respect multiframe editing settings
+                    for s in fr.strokes
+                        if s.select
+                            for p in s.points
+                                if p.select]
 
 def getPixel(X, Y):
     fb = gpu.state.active_framebuffer_get()
@@ -89,39 +83,37 @@ SHIFT-Left click to sample Stroke color.
         return {'RUNNING_MODAL'}
 
 class hardnessOperator(bpy.types.Operator):
-    """Middle mouse to adjust selected Strokes' hardness.
-Hold CTRL to adjust radius/strength.
-Hold SHIFT to adjust pressure.
-Left click to apply.
-"""
+    """Middle mouse to adjust selected strokes' hardness.
+Hold CTRL to adjust selected points' pressure(radius) instead.
+Hold SHIFT to adjust selected points' strength instead.
+Left click to apply"""
     
     bl_idname = "stroke.hardness"
     bl_label = "Stroke Hardness"
     bl_options = {'REGISTER', 'UNDO'}
-    
+    selected_points = []
     @classmethod
     def poll(self, context):
         return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
     
     def modal(self, context, event):
-        global selected_points
-        
         if event.type == "WHEELUPMOUSE" or event.type == "WHEELDOWNMOUSE":
             incr = -0.01 if event.type == "WHEELDOWNMOUSE" else 0.01
 
             if event.shift:
                 incr *= 2
-                for p in selected_points:
+                for p in self.selected_points:
                     p.strength += incr
             elif event.ctrl:
                 incr *= 10
-                for p in selected_points:
+                for p in self.selected_points:
                     p.pressure += incr
-            else:    
-                for lr in context.active_object.data.layers:
-                    if lr.hide or lr.lock: continue
-                    for fr in lr.frames:
-                        if fr.frame_number == context.scene.frame_current:
+            else:
+                gp =  context.active_object.data
+                for lr in gp.layers:
+                    if not lr.lock and not lr.hide:
+                        frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
+                        for fr in frame_list:
                             for s in fr.strokes:
                                 if s.select:
                                     s.hardness += incr
@@ -135,11 +127,76 @@ Left click to apply.
         return {'RUNNING_MODAL'}    
 
     def execute(self, context):
-        init_selected(context)    
+        self.selected_points = get_selected_points(context)    
         context.window.cursor_modal_set("SCROLL_Y")
         context.window_manager.modal_handler_add(self)
         
         return {'RUNNING_MODAL'}
+    
+class GPExtras_OT_set_stroke_property(bpy.types.Operator):
+    """Sets the selected strokes' hardness, or the selected points' pressure or strength"""
+    bl_idname = "gpextras.set_stroke_property"
+    bl_label = "Set Stroke or Point Property"
+    bl_options = {'REGISTER','UNDO'}
+
+    value : FloatProperty(default=-1, name = "Value", description = "Amount to set the property to", options={'SKIP_SAVE'})
+    mode : EnumProperty(items = [('HARDNESS', 'Hardness', "Strokes' Hardness"),
+                                 ('LINE_WIDTH', 'Line Width', "Strokes' Line Width"),
+                                 ('PRESSURE', 'Pressure', "Points' Pressure"), 
+                                 ('STRENGTH', 'Strength', "Points' Strength")], name = "Mode", description = "Which property the operator should set", default = 'HARDNESS',
+            options={'SKIP_SAVE'})
+    
+    @classmethod
+    def description(cls, context, properties):
+        match properties.mode:
+            case 'HARDNESS':
+                return "Sets the selected strokes' Hardness to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+            case 'LINE_WIDTH':
+                return "Sets the selected strokes' Line Width to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+            case 'PRESSURE':
+                return "Sets the selected points' Pressure to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+            case 'STRENGTH':
+                return "Sets the selected points' Strength to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+        return "Sets the selected strokes' hardness, or the selected points' pressure or strength"
+    
+    @classmethod
+    def poll(self, context):
+        return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
+
+    def execute(self, context):
+        if self.value == -1:
+            self.value = context.scene.gp_extras_stroke_prop_set_value
+        match self.mode:
+            case 'HARDNESS':
+                gp =  context.active_object.data
+                for lr in gp.layers:
+                    if not lr.lock and not lr.hide:
+                        frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
+                        for fr in frame_list:
+                            for s in fr.strokes:
+                                if s.select:
+                                    s.hardness = self.value
+            case 'LINE_WIDTH':
+                gp =  context.active_object.data
+                value_int = int(self.value)
+                for lr in gp.layers:
+                    if not lr.lock and not lr.hide:
+                        frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
+                        for fr in frame_list:
+                            for s in fr.strokes:
+                                if s.select:
+                                    s.line_width = value_int
+            case 'PRESSURE':
+                selected_points = get_selected_points(context)
+                for p in selected_points:
+                    p.pressure = self.value
+            case 'STRENGTH':
+                selected_points = get_selected_points(context)
+                for p in selected_points:
+                    p.strength = self.value
+        return {'FINISHED'}
+
+        
 
 class mirrorOperator(bpy.types.Operator):
     arg: bpy.props.StringProperty()
@@ -180,7 +237,6 @@ class mirrorOperator(bpy.types.Operator):
             
         return {'FINISHED'}
 
-
 class convergeOperator(bpy.types.Operator):
     arg: bpy.props.StringProperty()
     
@@ -189,6 +245,7 @@ class convergeOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     selectedPoint = None
+    selected_points = []
     align : IntProperty(default=0)
 
     @classmethod
@@ -211,13 +268,12 @@ Left click to apply. Right click to cancel.
         return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
     
     def modal(self, context, event):
-        global selected_points
 
         if event.type == "MOUSEMOVE":
             pos = view3d_utils.region_2d_to_location_3d(context.region, context.space_data.region_3d, 
                 (event.mouse_region_x, event.mouse_region_y), (0,0,0))
 
-            for p in selected_points:
+            for p in self.selected_points:
                 v = Vector((pos[0] - p.co[0], 0, pos[2] - p.co[2]))
                 self.selectedPoint = None
                 if v.length < 0.04:
@@ -234,7 +290,7 @@ Left click to apply. Right click to cancel.
             context.window.cursor_modal_restore()
 
             if self.selectedPoint:
-                for p in selected_points:
+                for p in self.selected_points:
                     if self.align == 0 or self.align == 1:
                         p.co[0] = self.selectedPoint.co[0]
                     if self.align == 0 or self.align == 2:
@@ -251,7 +307,7 @@ Left click to apply. Right click to cancel.
         return {'RUNNING_MODAL'}    
     
     def execute(self, context):
-        init_selected(context)    
+        self.selected_points = get_selected_points(context)    
         context.window.cursor_modal_set("PAINT_CROSS")
         context.window_manager.modal_handler_add(self)
         
@@ -331,56 +387,82 @@ class PGP_PT_sidebarPanel(bpy.types.Panel):
         layout = self.layout
         box = layout.box()
         row = box.row(align=True)
-        col = row.column()
+        row.alignment = 'CENTER'
         # Converge selection
-        col.operator('stroke.converge', icon = 'ANCHOR_CENTER', text = '' ).align = 0
-        col = row.column()
+        row.operator('stroke.converge', icon = 'ANCHOR_CENTER', text = '' ).align = 0
         # Align Horizontally
-        col.operator('stroke.converge', icon = 'ANCHOR_LEFT', text = '' ).align = 1
-        col = row.column()
+        row.operator('stroke.converge', icon = 'ANCHOR_LEFT', text = '' ).align = 1
         # Align Vertically
-        col.operator('stroke.converge', icon = 'ANCHOR_TOP', text = '' ).align = 2
-        
+        row.operator('stroke.converge', icon = 'ANCHOR_TOP', text = '' ).align = 2
         row.separator()
-
-        col = row.column()
-        col.operator('stroke.mirror', icon = 'MOD_MIRROR', text = "").mirror = 0
-        col = row.column()
-        col.operator('stroke.mirror', icon = 'SNAP_EDGE', text = "").mirror = 1
-
+        # Mirror
+        row.operator('stroke.mirror', icon = 'MOD_MIRROR', text = "").mirror = 0
+        row.operator('stroke.mirror', icon = 'SNAP_EDGE', text = "").mirror = 1
         row.separator()
-        
-        col = row.column()
-        col.operator('stroke.sample', icon = 'MOD_PARTICLE_INSTANCE', text = "")
-
+        # Sample
+        row.operator('stroke.sample', icon = 'MOD_PARTICLE_INSTANCE', text = "")
         row.separator()
-
-        col = row.column()
-        col.operator('color.eyedropper', icon = 'EYEDROPPER', text = "")
-
+        # Eyedropper
+        row.operator('color.eyedropper', icon = 'EYEDROPPER', text = "")
         box = layout.box()
         row = box.row(align=True)
-        col = row.column()
-        col.operator('view3d.cutstroke_operator', icon = "SNAP_MIDPOINT", text = "" )
+        row.alignment = 'CENTER'
+        # Cut Strokes
+        row.operator('view3d.cutstroke_operator', icon = "SNAP_MIDPOINT", text = "" ) 
         row.separator()
-        col = row.column()
-        col.operator('stroke.snapigon', icon = "SNAP_ON", text = "" )
+        # Snapigon
+        row.operator('stroke.snapigon', icon = "SNAP_ON", text = "" )
         row.separator()
-        col = row.column()
-        col.operator( 'object.pointslide_operator', icon='CON_TRACKTO', text='' )
+        # Point Slide
+        row.operator( 'object.pointslide_operator', icon='CON_TRACKTO', text='' )
         row.separator()
-        col = row.column()
-        col.operator('stroke.hardness', icon = 'EVENT_H', text = "")
+        # Hardness
+        row.operator('stroke.hardness', icon = 'EVENT_H', text = "")
         row.separator()
-        col = row.column()
-        col.operator("object.drawtext_operator", icon='EVENT_T', text='')
-
-        
+        # Text
+        row.operator("object.drawtext_operator", icon='EVENT_T', text='')
+        # Set Stroke/Point Properties
+        box = layout.box()
+        col = box.column(align=False)
+        # Set Prop to 1
+        row = col.row(align=True)
+        rowception = row.row()
+        rowception.alignment = 'CENTER'
+        rowception.label(text="1")
+        props = row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '')
+        props.mode, props.value = 'HARDNESS', 1
+        props = row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '')
+        props.mode, props.value = 'LINE_WIDTH', 1
+        props = row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '')
+        props.mode, props.value = 'PRESSURE', 1
+        props = row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '')
+        props.mode, props.value = 'STRENGTH', 1
+        # Set Prop to Variable
+        row = col.row(align=True)
+        row.prop(context.scene, "gp_extras_stroke_prop_set_value", text="")
+        row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '').mode = 'HARDNESS'
+        row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '').mode = 'LINE_WIDTH'
+        row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '',text_ctxt="Sets the selected points' pressure").mode = 'PRESSURE'
+        row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '').mode = 'STRENGTH'
+        # Set Prop to 0
+        row = col.row(align=True)
+        rowception = row.row()
+        rowception.alignment = 'CENTER'
+        rowception.label(text="0")
+        props = row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '')
+        props.mode, props.value = 'HARDNESS', 0
+        props = row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '')
+        props.mode, props.value = 'LINE_WIDTH', 0
+        props = row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '')
+        props.mode, props.value = 'PRESSURE', 0
+        props = row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '')
+        props.mode, props.value = 'STRENGTH', 0
 
 # Class list to register
 _classes = [
     eyedropperOperator,
     hardnessOperator,
+    GPExtras_OT_set_stroke_property,
     convergeOperator,
     mirrorOperator,
     quickStrokeSampleOperator,
@@ -389,12 +471,10 @@ _classes = [
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.gp_extras_stroke_prop_set_value = FloatProperty(default=0.5,min=0,name="Set Value",description="Value to set the selected strokes/points' hardness/pressure/strength to")
     
 def unregister():
-    for cls in _classes:
-        bpy.utils.unregister_class(cls)
-    
-def unregister():
+    del bpy.types.Scene.gp_extras_stroke_prop_set_value
     for cls in _classes:
         bpy.utils.unregister_class(cls)
         
