@@ -143,7 +143,7 @@ class GPExtras_OT_set_stroke_property(bpy.types.Operator):
     bl_label = "Set Stroke or Point Property"
     bl_options = {'REGISTER','UNDO'}
 
-    value : FloatProperty(default=-1, name = "Value", description = "Amount to set the property to", options={'SKIP_SAVE'})
+    value : FloatProperty(default=-1, min=0, name = "Value", description = "Amount to set the property to", options={'SKIP_SAVE'})
     mode : EnumProperty(items = [('HARDNESS', 'Hardness', "Strokes' Hardness"),
                                  ('LINE_WIDTH', 'Line Width', "Strokes' Line Width"),
                                  ('PRESSURE', 'Pressure', "Points' Pressure"), 
@@ -160,14 +160,14 @@ Shift Click to use linear scaling for the hardness value"""
             case 'LINE_WIDTH':
                 desc = "Sets the selected strokes' Line Width to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
             case 'PRESSURE':
-                desc = "Sets the selected points' Pressure to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+                desc = "Sets the selected points' Pressure(Thickness) to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
             case 'STRENGTH':
-                desc = "Sets the selected points' Strength to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+                desc = "Sets the selected points' Strength(Transparency) to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
             case _: #Default. Shouldn't happen, but you never know.
                 desc = "Sets the selected strokes' hardness, or the selected points' pressure or strength"
         desc += """.
-Control Click to set to 1.
-Alt Click to set to 0"""
+Alt Click to set to 1.
+Control Click to set to 0"""
         return desc
     
     @classmethod
@@ -175,9 +175,9 @@ Alt Click to set to 0"""
         return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
 
     def invoke(self, context, event):
-        if event.ctrl:
+        if event.alt:
             self.value = 1
-        elif event.alt:
+        elif event.ctrl:
             self.value = 0
         elif self.value == -1:
             self.value = context.scene.gp_extras_stroke_prop_set_value
@@ -191,7 +191,13 @@ Alt Click to set to 0"""
         match self.mode:
             case 'HARDNESS':
                 gp =  context.active_object.data
-                adjusted_value = pow(self.value, 0.1) if self.linear_scale else self.value
+                if self.value == 0 or self.value >= 1:
+                    adjusted_value = self.value
+                else:
+                    try: 
+                        adjusted_value = max(0, min(pow(self.value, 0.1) if self.linear_scale else self.value, 1))
+                    except:
+                        adjusted_value = 0
                 for lr in gp.layers:
                     if not lr.lock and not lr.hide:
                         frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
@@ -201,14 +207,14 @@ Alt Click to set to 0"""
                                     s.hardness = adjusted_value
             case 'LINE_WIDTH':
                 gp =  context.active_object.data
-                value_int = int(self.value)
+                adjusted_value = int(self.value)    #Line Width needs to be an int
                 for lr in gp.layers:
                     if not lr.lock and not lr.hide:
                         frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
                         for fr in frame_list:
                             for s in fr.strokes:
                                 if s.select:
-                                    s.line_width = value_int
+                                    s.line_width = adjusted_value
             case 'PRESSURE':
                 selected_points = get_selected_points(context)
                 for p in selected_points:
