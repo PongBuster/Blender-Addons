@@ -14,7 +14,7 @@ import bpy
 import gpu
 from bpy_extras import view3d_utils
 from mathutils import Vector
-from bpy.props import IntProperty, FloatProperty, EnumProperty
+from bpy.props import IntProperty, FloatProperty, BoolProperty, EnumProperty
 
 def get_selected_points(context):
     if context.active_object.type != 'GPENCIL':
@@ -133,6 +133,10 @@ Left click to apply"""
         
         return {'RUNNING_MODAL'}
     
+    def cancel(self, context):
+        context.area.header_text_set(None)
+        context.window.cursor_modal_restore()
+    
 class GPExtras_OT_set_stroke_property(bpy.types.Operator):
     """Sets the selected strokes' hardness, or the selected points' pressure or strength"""
     bl_idname = "gpextras.set_stroke_property"
@@ -143,39 +147,58 @@ class GPExtras_OT_set_stroke_property(bpy.types.Operator):
     mode : EnumProperty(items = [('HARDNESS', 'Hardness', "Strokes' Hardness"),
                                  ('LINE_WIDTH', 'Line Width', "Strokes' Line Width"),
                                  ('PRESSURE', 'Pressure', "Points' Pressure"), 
-                                 ('STRENGTH', 'Strength', "Points' Strength")], name = "Mode", description = "Which property the operator should set", default = 'HARDNESS',
-            options={'SKIP_SAVE'})
+                                 ('STRENGTH', 'Strength', "Points' Strength")], name = "Mode", description = "Which property the operator should set", default = 'HARDNESS',options={'SKIP_SAVE'})
+    linear_scale : BoolProperty(default=False, name = "Linear Scale", description = "Use linear values to set the stroke's hardness")
     
     @classmethod
     def description(cls, context, properties):
         match properties.mode:
             case 'HARDNESS':
-                return "Sets the selected strokes' Hardness to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+                desc = "Sets the selected strokes' Hardness to " + ("the given value" if properties.value == -1 else str(int(properties.value))) + """.
+Shift Click to use linear scaling for the hardness value"""
+                
             case 'LINE_WIDTH':
-                return "Sets the selected strokes' Line Width to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+                desc = "Sets the selected strokes' Line Width to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
             case 'PRESSURE':
-                return "Sets the selected points' Pressure to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+                desc = "Sets the selected points' Pressure to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
             case 'STRENGTH':
-                return "Sets the selected points' Strength to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
-        return "Sets the selected strokes' hardness, or the selected points' pressure or strength"
+                desc = "Sets the selected points' Strength to " + ("the given value" if properties.value == -1 else str(int(properties.value)))
+            case _: #Default. Shouldn't happen, but you never know.
+                desc = "Sets the selected strokes' hardness, or the selected points' pressure or strength"
+        desc += """.
+Control Click to set to 1.
+Alt Click to set to 0"""
+        return desc
     
     @classmethod
     def poll(self, context):
         return (context.mode == 'SCULPT_GPENCIL' or context.mode == 'EDIT_GPENCIL')
 
-    def execute(self, context):
-        if self.value == -1:
+    def invoke(self, context, event):
+        if event.ctrl:
+            self.value = 1
+        elif event.alt:
+            self.value = 0
+        elif self.value == -1:
             self.value = context.scene.gp_extras_stroke_prop_set_value
+        if event.shift:
+            self.linear_scale = True
+        
+        self.execute(context)
+        return {'FINISHED'}
+        
+    def execute(self, context):
         match self.mode:
             case 'HARDNESS':
                 gp =  context.active_object.data
+                adjusted_value = pow(self.value, 0.1) if self.linear_scale else self.value
                 for lr in gp.layers:
                     if not lr.lock and not lr.hide:
                         frame_list = [fr for fr in lr.frames if fr.select] if gp.use_multiedit else [lr.active_frame]
                         for fr in frame_list:
                             for s in fr.strokes:
                                 if s.select:
-                                    s.hardness = self.value
+                                    s.hardness = adjusted_value
             case 'LINE_WIDTH':
                 gp =  context.active_object.data
                 value_int = int(self.value)
@@ -195,6 +218,16 @@ class GPExtras_OT_set_stroke_property(bpy.types.Operator):
                 for p in selected_points:
                     p.strength = self.value
         return {'FINISHED'}
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        layout.prop(self, "mode")
+        layout.prop(self, "value")
+        if self.mode == 'HARDNESS':
+            layout.prop(self, "linear_scale")
+    
 
         
 
@@ -423,40 +456,17 @@ class PGP_PT_sidebarPanel(bpy.types.Panel):
         row.operator("object.drawtext_operator", icon='EVENT_T', text='')
         # Set Stroke/Point Properties
         box = layout.box()
-        col = box.column(align=False)
-        # Set Prop to 1
-        row = col.row(align=True)
-        rowception = row.row()
-        rowception.alignment = 'CENTER'
-        rowception.label(text="1")
-        props = row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '')
-        props.mode, props.value = 'HARDNESS', 1
-        props = row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '')
-        props.mode, props.value = 'LINE_WIDTH', 1
-        props = row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '')
-        props.mode, props.value = 'PRESSURE', 1
-        props = row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '')
-        props.mode, props.value = 'STRENGTH', 1
-        # Set Prop to Variable
-        row = col.row(align=True)
+        row = box.row(align=True)
         row.prop(context.scene, "gp_extras_stroke_prop_set_value", text="")
         row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '').mode = 'HARDNESS'
-        row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '').mode = 'LINE_WIDTH'
         row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '',text_ctxt="Sets the selected points' pressure").mode = 'PRESSURE'
         row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '').mode = 'STRENGTH'
-        # Set Prop to 0
-        row = col.row(align=True)
-        rowception = row.row()
-        rowception.alignment = 'CENTER'
-        rowception.label(text="0")
-        props = row.operator('gpextras.set_stroke_property', icon='MOD_OUTLINE',text = '')
-        props.mode, props.value = 'HARDNESS', 0
-        props = row.operator('gpextras.set_stroke_property', icon='PARTICLE_PATH',text = '')
-        props.mode, props.value = 'LINE_WIDTH', 0
-        props = row.operator('gpextras.set_stroke_property', icon='STYLUS_PRESSURE',text = '')
-        props.mode, props.value = 'PRESSURE', 0
-        props = row.operator('gpextras.set_stroke_property', icon='GP_MULTIFRAME_EDITING',text = '')
-        props.mode, props.value = 'STRENGTH', 0
+
+# Menu Additions
+def gp_edit_gpencil_stroke_appends(self, context):
+    props = self.layout.operator("gpextras.set_stroke_property", text = "Set Hardness")
+    props.mode = 'HARDNESS'
+    props.value = 1
 
 # Class list to register
 _classes = [
@@ -471,7 +481,8 @@ _classes = [
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.gp_extras_stroke_prop_set_value = FloatProperty(default=0.5,min=0,name="Set Value",description="Value to set the selected strokes/points' hardness/pressure/strength to")
+    bpy.types.Scene.gp_extras_stroke_prop_set_value = FloatProperty(default=0.5,min=0,max=300,name="Set Value",description="Value to set the selected strokes/points' hardness/pressure/strength to")
+    bpy.types.VIEW3D_MT_edit_gpencil_stroke.append(gp_edit_gpencil_stroke_appends)
     
 def unregister():
     del bpy.types.Scene.gp_extras_stroke_prop_set_value
